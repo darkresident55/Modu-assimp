@@ -74,6 +74,19 @@ void DNAParser::Parse() {
     StreamReaderAny &stream = *db.reader;
     DNA &dna = db.dna;
 
+    // Blender pads the DNA sections to a 4-byte boundary measured from the start of
+    // the DNA1 block, not from the start of the file. The two coincide only while the
+    // block itself happens to land on a 4-byte file offset, which Blender does not
+    // guarantee. A Blender 4.4 file (BLENDER-v404) observed with the DNA data at file
+    // offset 1430282 (% 4 == 2) aligned two bytes past "TYPE" and failed to import
+    // with "BlenderDNA: Expected TYPE field". Anchor the padding to the block.
+    const size_t dnaBlockStart = stream.GetCurrentPos();
+    const auto alignToDnaBlock = [&stream, dnaBlockStart]() {
+        while ((stream.GetCurrentPos() - dnaBlockStart) & 0x3) {
+            stream.GetI1();
+        }
+    };
+
     if (!match4(stream, "SDNA")) {
         throw DeadlyImportError("BlenderDNA: Expected SDNA chunk");
     }
@@ -91,8 +104,7 @@ void DNAParser::Parse() {
     }
 
     // type dictionary
-    for (; stream.GetCurrentPos() & 0x3; stream.GetI1())
-        ;
+    alignToDnaBlock();
     if (!match4(stream, "TYPE")) {
         throw DeadlyImportError("BlenderDNA: Expected TYPE field");
     }
@@ -105,8 +117,7 @@ void DNAParser::Parse() {
     }
 
     // type length dictionary
-    for (; stream.GetCurrentPos() & 0x3; stream.GetI1())
-        ;
+    alignToDnaBlock();
     if (!match4(stream, "TLEN")) {
         throw DeadlyImportError("BlenderDNA: Expected TLEN field");
     }
@@ -116,8 +127,7 @@ void DNAParser::Parse() {
     }
 
     // structures dictionary
-    for (; stream.GetCurrentPos() & 0x3; stream.GetI1())
-        ;
+    alignToDnaBlock();
     if (!match4(stream, "STRC")) {
         throw DeadlyImportError("BlenderDNA: Expected STRC field");
     }
