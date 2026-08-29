@@ -501,18 +501,38 @@ void Structure ::Convert<Mesh>(
     ReadField<ErrorPolicy_Igno>(dest.subdivr, "subdivr", db);
     ReadField<ErrorPolicy_Igno>(dest.subsurftype, "subsurftype", db);
     ReadField<ErrorPolicy_Igno>(dest.smoothresh, "smoothresh", db);
-    ReadFieldPtr<ErrorPolicy_Fail>(dest.mface, "*mface", db);
-    ReadFieldPtr<ErrorPolicy_Igno>(dest.mtface, "*mtface", db);
-    ReadFieldPtr<ErrorPolicy_Igno>(dest.tface, "*tface", db);
-    ReadFieldPtr<ErrorPolicy_Fail>(dest.mvert, "*mvert", db);
-    ReadFieldPtr<ErrorPolicy_Warn>(dest.medge, "*medge", db);
-    ReadFieldPtr<ErrorPolicy_Igno>(dest.mloop, "*mloop", db);
-    ReadFieldPtr<ErrorPolicy_Igno>(dest.mloopuv, "*mloopuv", db);
-    ReadFieldPtr<ErrorPolicy_Igno>(dest.mloopcol, "*mloopcol", db);
-    ReadFieldPtr<ErrorPolicy_Igno>(dest.mpoly, "*mpoly", db);
-    ReadFieldPtr<ErrorPolicy_Igno>(dest.mtpoly, "*mtpoly", db);
-    ReadFieldPtr<ErrorPolicy_Igno>(dest.dvert, "*dvert", db);
-    ReadFieldPtr<ErrorPolicy_Igno>(dest.mcol, "*mcol", db);
+    // The element counts above are authoritative, and the pointers below are only
+    // followed when their count says there is something to follow.
+    //
+    // Blender still writes an address for a zero-length array, and a zero-size
+    // allocation lands wherever the allocator happened to be - typically inside the
+    // block allocated next. Resolving it makes the loader identify that unrelated
+    // block and type-check it against the field, so a mesh carrying no faces dies
+    // with "Expected target to be of type `MLoop` but seemingly it is a `MEdge`".
+    // Nothing is wrong with such a file: the array is simply empty. Seen on a
+    // Blender 3.6 file holding a 3-vertex, 3-edge, 0-face helper mesh.
+    if (dest.totface > 0) {
+        ReadFieldPtr<ErrorPolicy_Fail>(dest.mface, "*mface", db);
+        ReadFieldPtr<ErrorPolicy_Igno>(dest.mtface, "*mtface", db);
+        ReadFieldPtr<ErrorPolicy_Igno>(dest.tface, "*tface", db);
+        ReadFieldPtr<ErrorPolicy_Igno>(dest.mcol, "*mcol", db);
+    }
+    if (dest.totvert > 0) {
+        ReadFieldPtr<ErrorPolicy_Fail>(dest.mvert, "*mvert", db);
+        ReadFieldPtr<ErrorPolicy_Igno>(dest.dvert, "*dvert", db);
+    }
+    if (dest.totedge > 0) {
+        ReadFieldPtr<ErrorPolicy_Warn>(dest.medge, "*medge", db);
+    }
+    if (dest.totloop > 0) {
+        ReadFieldPtr<ErrorPolicy_Igno>(dest.mloop, "*mloop", db);
+        ReadFieldPtr<ErrorPolicy_Igno>(dest.mloopuv, "*mloopuv", db);
+        ReadFieldPtr<ErrorPolicy_Igno>(dest.mloopcol, "*mloopcol", db);
+    }
+    if (dest.totpoly > 0) {
+        ReadFieldPtr<ErrorPolicy_Igno>(dest.mpoly, "*mpoly", db);
+        ReadFieldPtr<ErrorPolicy_Igno>(dest.mtpoly, "*mtpoly", db);
+    }
     ReadFieldPtr<ErrorPolicy_Fail>(dest.mat, "**mat", db);
 
     ReadField<ErrorPolicy_Igno>(dest.vdata, "vdata", db);

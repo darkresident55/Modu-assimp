@@ -422,8 +422,15 @@ bool Structure :: ResolvePointer(TOUT<T>& out, const Pointer & ptrval, const Fil
     // and check if it matches the type which we expect.
     const Structure& ss = db.dna[block->dna_index];
     if (ss != s) {
+        // Kept fatal deliberately. Returning an empty array here instead looks
+        // tempting - the block really does belong to something else - but downstream
+        // conversion indexes these arrays against the mesh element counts, and an
+        // empty one segfaults. Fixing this properly means making ReadFieldPtr guard
+        // the resolution as well as the pointer read, so the per-field error policy
+        // actually governs it; today the policy only covers reading the address.
         throw Error("Expected target to be of type `",s.name,
-            "` but seemingly it is a `",ss.name,"` instead"
+            "` but seemingly it is a `",ss.name,"` instead (field `",f.name,
+            "` of `",this->name,"`)"
             );
     }
 
