@@ -53,6 +53,9 @@ namespace Assimp {
 namespace Blender {
 
 //--------------------------------------------------------------------------------
+// Defined below; rebuilds the legacy mesh arrays from Blender 4.x attribute layers.
+void ConvertBlender4xMeshData(Mesh &dest, const Structure &s, const FileDatabase &db);
+
 template <>
 void Structure ::Convert<Object>(
         Object &dest,
@@ -518,6 +521,10 @@ void Structure ::Convert<Mesh>(
     ReadField<ErrorPolicy_Igno>(dest.pdata, "pdata", db);
     ReadField<ErrorPolicy_Warn>(dest.ldata, "ldata", db);
 
+    // Blender 4.x keeps the geometry in attribute layers and writes the legacy arrays
+    // as null; rebuild them so the rest of the importer sees a mesh it understands.
+    ConvertBlender4xMeshData(dest, *this, db);
+
     db.reader->IncPtr(size);
 }
 
@@ -840,8 +847,210 @@ void Structure::Convert<CustomDataLayer>(
     ReadField<ErrorPolicy_Warn>(dest.uid, "uid", db);
     ReadFieldArray<ErrorPolicy_Warn>(dest.name, "name", db);
     ReadCustomDataPtr<ErrorPolicy_Fail>(dest.data, dest.type, "*data", db);
+    {
+        // Also keep the bare address - see CustomDataLayer::rawData. Reading it here
+        // rather than in the 4.x path keeps all knowledge of the field offset local to
+        // the converter that owns this structure.
+        const StreamReaderAny::pos old = db.reader->GetCurrentPos();
+        dest.rawData.val = 0;
+        try {
+            const Field &f = (*this)["*data"];
+            db.reader->IncPtr(f.offset);
+            Convert(dest.rawData, db);
+        } catch (const Error &) {
+            dest.rawData.val = 0;
+        }
+        db.reader->SetCurrentPos(old);
+    }
 
     db.reader->IncPtr(size);
+}
+
+// ------------------------------------------------------------------------------------------------
+// Blender 4.x mesh adaptation.
+//
+// From Blender 3.6/4.0 on, mesh geometry no longer lives in the MVert/MEdge/MLoop/MPoly
+// arrays - those pointers are written as null - and is stored instead in generic named
+// attribute layers plus a face offset table:
+//
+//     vertices  vdata "position"      CD_PROP_FLOAT3    float[3] per vertex
+//     edges     edata ".edge_verts"   CD_PROP_INT32_2D  int[2]   per edge
+//     corners   ldata ".corner_vert"  CD_PROP_INT32     int      per loop
+//               ldata ".corner_edge"  CD_PROP_INT32     int      per loop
+//     uvs       ldata <any name>      CD_PROP_FLOAT2    float[2] per loop
+//     faces     Mesh.poly_offset_indices                int      per face + 1
+//
+// Rather than teach the importer a second mesh representation end to end, this rebuilds
+// the legacy arrays from those layers, leaving every downstream converter unchanged.
+namespace {
+
+// Blender 4.x eCustomDataType values for the generic property layers.
+constexpr int kCDPropInt32_2D = 46;
+constexpr int kCDPropFloat3 = 48;
+constexpr int kCDPropFloat2 = 49;
+
+// Point the stream at `ptr`, first confirming the block behind it really holds `count`
+// elements of `elemSize`. A short block means the file is not shaped the way this code
+// assumes, and reading on would walk into whatever follows it.
+bool SeekToRawArray(const Pointer &ptr, size_t count, size_t elemSize,
+                    const Structure &s, const FileDatabase &db) {
+    if (!ptr.val || count == 0) {
+        return false;
+    }
+    const FileBlockHead *block = s.LocateFileBlockForAddress(ptr, db);
+    if (block == nullptr || ptr.val < block->address.val) {
+        return false;
+    }
+    const size_t offset = static_cast<size_t>(ptr.val - block->address.val);
+    if (offset > block->size || count * elemSize > block->size - offset) {
+        return false;
+    }
+    db.reader->SetCurrentPos(block->start + offset);
+    return true;
+}
+
+const CustomDataLayer *FindLayerByName(const CustomData &data, const char *name) {
+    for (const std::shared_ptr<CustomDataLayer> &layer : data.layers) {
+        if (layer && layer->rawData.val && !strcmp(layer->name, name)) {
+            return layer.get();
+        }
+    }
+    return nullptr;
+}
+
+const CustomDataLayer *FindLayerByType(const CustomData &data, int type) {
+    for (const std::shared_ptr<CustomDataLayer> &layer : data.layers) {
+        if (layer && layer->rawData.val && layer->type == type) {
+            return layer.get();
+        }
+    }
+    return nullptr;
+}
+
+} // namespace
+
+void ConvertBlender4xMeshData(Mesh &dest, const Structure &s, const FileDatabase &db) {
+    // Only step in when the legacy representation is genuinely absent - a pre-4.x file
+    // fills these itself and must be left alone.
+    if (!dest.mvert.empty() || dest.totvert <= 0 || dest.totloop <= 0 || dest.totpoly <= 0) {
+        return;
+    }
+
+    const size_t vertCount = static_cast<size_t>(dest.totvert);
+    const size_t loopCount = static_cast<size_t>(dest.totloop);
+    const size_t polyCount = static_cast<size_t>(dest.totpoly);
+    const size_t edgeCount = dest.totedge > 0 ? static_cast<size_t>(dest.totedge) : 0;
+
+    // Every read below seeks absolutely, so the caller's position has to be restored
+    // before returning down any path.
+    const StreamReaderAny::pos meshBase = db.reader->GetCurrentPos();
+    struct PosRestore {
+        const FileDatabase &db;
+        StreamReaderAny::pos pos;
+        ~PosRestore() { db.reader->SetCurrentPos(pos); }
+    } restore{db, meshBase};
+
+    // --- face offsets: polyCount + 1 entries, the last one closing the final face ---
+    Pointer polyOffsets;
+    polyOffsets.val = 0;
+    try {
+        const Field &f = s["*poly_offset_indices"];
+        db.reader->IncPtr(f.offset);
+        s.Convert(polyOffsets, db);
+    } catch (const Error &) {
+        return;
+    }
+    if (!SeekToRawArray(polyOffsets, polyCount + 1, 4, s, db)) {
+        return;
+    }
+    std::vector<int> offsets(polyCount + 1);
+    for (size_t i = 0; i <= polyCount; ++i) {
+        offsets[i] = db.reader->GetI4();
+    }
+
+    // --- vertices -----------------------------------------------------------------
+    const CustomDataLayer *positions = FindLayerByName(dest.vdata, "position");
+    if (positions == nullptr) {
+        positions = FindLayerByType(dest.vdata, kCDPropFloat3);
+    }
+    if (positions == nullptr || !SeekToRawArray(positions->rawData, vertCount, 12, s, db)) {
+        return;
+    }
+    dest.mvert.resize(vertCount);
+    for (size_t i = 0; i < vertCount; ++i) {
+        MVert &v = dest.mvert[i];
+        v.co[0] = db.reader->GetF4();
+        v.co[1] = db.reader->GetF4();
+        v.co[2] = db.reader->GetF4();
+        // 4.x stores no per-vertex normal; they get computed from the faces downstream.
+        v.no[0] = v.no[1] = v.no[2] = 0.f;
+        v.flag = 0;
+        v.mat_nr = 0;
+        v.bweight = 0;
+    }
+
+    // --- corners ------------------------------------------------------------------
+    const CustomDataLayer *cornerVert = FindLayerByName(dest.ldata, ".corner_vert");
+    if (cornerVert == nullptr || !SeekToRawArray(cornerVert->rawData, loopCount, 4, s, db)) {
+        dest.mvert.clear(); // leave nothing half-built for the sanity checks to accept
+        return;
+    }
+    dest.mloop.resize(loopCount);
+    for (size_t i = 0; i < loopCount; ++i) {
+        dest.mloop[i].v = db.reader->GetI4();
+        dest.mloop[i].e = 0;
+    }
+    const CustomDataLayer *cornerEdge = FindLayerByName(dest.ldata, ".corner_edge");
+    if (cornerEdge != nullptr && SeekToRawArray(cornerEdge->rawData, loopCount, 4, s, db)) {
+        for (size_t i = 0; i < loopCount; ++i) {
+            dest.mloop[i].e = db.reader->GetI4();
+        }
+    }
+
+    // --- faces --------------------------------------------------------------------
+    dest.mpoly.resize(polyCount);
+    for (size_t i = 0; i < polyCount; ++i) {
+        MPoly &p = dest.mpoly[i];
+        p.loopstart = offsets[i];
+        p.totloop = offsets[i + 1] - offsets[i];
+        p.mat_nr = 0;
+        p.flag = 0;
+    }
+
+    // --- edges --------------------------------------------------------------------
+    const CustomDataLayer *edgeVerts = FindLayerByName(dest.edata, ".edge_verts");
+    if (edgeVerts == nullptr) {
+        edgeVerts = FindLayerByType(dest.edata, kCDPropInt32_2D);
+    }
+    if (edgeCount && edgeVerts != nullptr && SeekToRawArray(edgeVerts->rawData, edgeCount, 8, s, db)) {
+        dest.medge.resize(edgeCount);
+        for (size_t i = 0; i < edgeCount; ++i) {
+            MEdge &e = dest.medge[i];
+            e.v1 = db.reader->GetI4();
+            e.v2 = db.reader->GetI4();
+            e.crease = e.bweight = 0;
+            e.flag = 0;
+        }
+    }
+
+    // --- uvs: any CD_PROP_FLOAT2 loop layer, "UVMap" by default -------------------
+    const CustomDataLayer *uv = FindLayerByType(dest.ldata, kCDPropFloat2);
+    if (uv != nullptr && SeekToRawArray(uv->rawData, loopCount, 8, s, db)) {
+        dest.mloopuv.resize(loopCount);
+        for (size_t i = 0; i < loopCount; ++i) {
+            dest.mloopuv[i].uv[0] = db.reader->GetF4();
+            dest.mloopuv[i].uv[1] = db.reader->GetF4();
+            dest.mloopuv[i].flag = 0;
+        }
+    }
+
+    // --- per-face material index --------------------------------------------------
+    const CustomDataLayer *matIndex = FindLayerByName(dest.pdata, "material_index");
+    if (matIndex != nullptr && SeekToRawArray(matIndex->rawData, polyCount, 4, s, db)) {
+        for (size_t i = 0; i < polyCount; ++i) {
+            dest.mpoly[i].mat_nr = static_cast<short>(db.reader->GetI4());
+        }
+    }
 }
 
 //--------------------------------------------------------------------------------

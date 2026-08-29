@@ -339,9 +339,14 @@ private:
             const FileDatabase &db, const Field &f, bool) const;
 
     // --------------------------------------------------------
+public:
+    // Public so the Blender 4.x mesh adapter in BlenderScene.cpp can resolve the
+    // attribute-layer payload addresses; it is a pure lookup with no side effects.
     inline const FileBlockHead *LocateFileBlockForAddress(
             const Pointer &ptrval,
             const FileDatabase &db) const;
+
+private:
 
 private:
     // ------------------------------------------------------------------------------

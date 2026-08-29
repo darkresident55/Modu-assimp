@@ -413,6 +413,11 @@ struct CustomDataLayer final : ElemBase {
     int uid;
     char name[64];
     std::shared_ptr<ElemBase> data; // must be converted to real type according type member
+    // Raw file address of `*data`, kept alongside the converted form. Blender 4.x
+    // carries the mesh in generic attribute layers whose element types (float3, int32,
+    // int32_2d, float2) have no legacy struct description, so `data` above stays null
+    // for them. This address lets those layers still be read as plain arrays.
+    Pointer rawData;
 
     CustomDataLayer() :
             type(0),

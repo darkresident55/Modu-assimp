@@ -151,7 +151,12 @@ bool isValidCustomDataType(const int cdtype) {
 
 bool readCustomData(std::shared_ptr<ElemBase> &out, const int cdtype, const size_t cnt, const FileDatabase &db) {
     if (!isValidCustomDataType(cdtype)) {
-        throw Error("CustomData.type ", cdtype, " out of index");
+        // Blender 4.x added generic attribute types well past this table (position=48,
+        // .edge_verts=46, UVMap=49, ...) and they are what carry the mesh now. They have
+        // no legacy struct description to read them through, but throwing here discards
+        // the entire layer list - including the layers the 4.x mesh adapter in
+        // BlenderScene.cpp needs. Skip the payload and keep the layer.
+        return false;
     }
 
     const CustomDataTypeDescription cdtd = customDataTypeDescriptions[cdtype];
