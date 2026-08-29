@@ -611,13 +611,25 @@ const FileBlockHead* Structure :: LocateFileBlockForAddress(const Pointer & ptrv
     // which are only used for structures starting with an ID.
     // We don't need to make this distinction, our algorithm
     // works regardless where the data is stored.
-    vector<FileBlockHead>::const_iterator it = std::lower_bound(db.entries.begin(),db.entries.end(),ptrval);
-    if (it == db.entries.end()) {
+    // upper_bound, not lower_bound: we need the block *containing* the address, which
+    // is the last one starting at or before it. lower_bound returns the first block
+    // starting at or after the address, which is only the right answer when the
+    // pointer happens to land exactly on a block boundary. Blender routinely packs
+    // several arrays into one data block, so an interior pointer would instead resolve
+    // to the *following* block - and the bounds check below could not catch it, since
+    // the address is below that block rather than past its end. The result was a
+    // wrong-but-plausible block whose type check then failed with messages like
+    // "Expected target to be of type `MVert` but seemingly it is a `MLoop` instead".
+    // The Pointer conversion and comparison helpers next to FileBlockHead are both
+    // commented "for std::upper_bound", so this is what was intended.
+    vector<FileBlockHead>::const_iterator it = std::upper_bound(db.entries.begin(),db.entries.end(),ptrval);
+    if (it == db.entries.begin()) {
         // this is crucial, pointers may not be invalid.
         // this is either a corrupted file or an attempted attack.
         throw DeadlyImportError("Failure resolving pointer 0x",
             std::hex,ptrval.val,", no file block falls into this address range");
     }
+    --it;
     if (ptrval.val >= (*it).address.val + (*it).size) {
         throw DeadlyImportError("Failure resolving pointer 0x",
             std::hex,ptrval.val,", nearest file block starting at 0x",

@@ -522,7 +522,28 @@ void Structure ::Convert<Mesh>(
         ReadFieldPtr<ErrorPolicy_Igno>(dest.dvert, "*dvert", db);
     }
     if (dest.totedge > 0) {
-        ReadFieldPtr<ErrorPolicy_Warn>(dest.medge, "*medge", db);
+        // Guarded, because ReadFieldPtr only wraps the pointer *read* in its
+        // try/catch - not the resolution that follows it. An error raised while
+        // resolving therefore escapes the ErrorPolicy_Warn declared here and lands on
+        // whatever outer Fail-policy read is in progress, aborting the whole import.
+        //
+        // That happens on real files: Blender allocations alias, and on a 3.6 file the
+        // edge pointer of one mesh resolved into an `MLoop` block. Swallowing it is
+        // safe specifically because nothing downstream consumes medge - the mesh
+        // conversion builds from mface/mpoly/mloop - so an empty edge array costs
+        // nothing. Do not generalise this to mvert/mloop/mpoly: those *are* indexed
+        // against the element counts, and emptying them segfaults.
+        // ReadFieldPtr restores the stream position as its last act, which an escaping
+        // exception skips - leaving the cursor wherever the failed resolution seeked to
+        // and turning every later field read into garbage. Restore it here.
+        const StreamReaderAny::pos edgeFieldPos = db.reader->GetCurrentPos();
+        try {
+            ReadFieldPtr<ErrorPolicy_Warn>(dest.medge, "*medge", db);
+        } catch (const Error &e) {
+            ASSIMP_LOG_WARN("BLEND: ignoring unreadable edge array: ", e.what());
+            dest.medge.clear();
+            db.reader->SetCurrentPos(edgeFieldPos);
+        }
     }
     if (dest.totloop > 0) {
         ReadFieldPtr<ErrorPolicy_Igno>(dest.mloop, "*mloop", db);
