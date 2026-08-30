@@ -718,6 +718,14 @@ struct Object final : ElemBase {
     Type type FAIL;
     float obmat[4][4] WARN;
     float parentinv[4][4] WARN;
+    // Blender 4.x no longer saves obmat, so the object-to-world matrix has to be
+    // rebuilt from these. They have been in the DNA all along and are still written.
+    float loc[3];
+    float dloc[3];
+    float rot[3];
+    float drot[3];
+    float size[3];
+    float dscale[3];
     char parsubstr[32] WARN;
 
     Object *parent WARN;

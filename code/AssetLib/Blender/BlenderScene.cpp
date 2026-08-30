@@ -68,6 +68,79 @@ void Structure ::Convert<Object>(
     dest.type = static_cast<Assimp::Blender::Object::Type>(temp);
     ReadFieldArray2<ErrorPolicy_Warn>(dest.obmat, "obmat", db);
     ReadFieldArray2<ErrorPolicy_Warn>(dest.parentinv, "parentinv", db);
+    ReadFieldArray<ErrorPolicy_Igno>(dest.loc, "loc", db);
+    ReadFieldArray<ErrorPolicy_Igno>(dest.dloc, "dloc", db);
+    ReadFieldArray<ErrorPolicy_Igno>(dest.rot, "rot", db);
+    ReadFieldArray<ErrorPolicy_Igno>(dest.drot, "drot", db);
+    ReadFieldArray<ErrorPolicy_Igno>(dest.size, "size", db);
+    ReadFieldArray<ErrorPolicy_Igno>(dest.dscale, "dscale", db);
+
+    // Blender 4.x dropped Object::obmat from the DNA - the object-to-world matrix is
+    // computed at runtime now and no longer written to the file. Assimp's node
+    // transform comes straight from that field, so on a 4.x file every object arrived
+    // with an all-zero matrix: meshes imported with perfect vertices, UVs and
+    // materials, and then collapsed to a point because their node scale was 0.
+    //
+    // A real affine matrix always has 1 in the last element, so 0 there is a reliable
+    // "this field was not present" signal rather than a guess about the contents.
+    if (dest.obmat[3][3] == 0.f) {
+        // Mirrors BKE_object_to_mat4: translation from loc + dloc, an XYZ Euler
+        // rotation from rot + drot, and scale from size * dscale.
+        const float lx = dest.loc[0] + dest.dloc[0];
+        const float ly = dest.loc[1] + dest.dloc[1];
+        const float lz = dest.loc[2] + dest.dloc[2];
+        const float rx = dest.rot[0] + dest.drot[0];
+        const float ry = dest.rot[1] + dest.drot[1];
+        const float rz = dest.rot[2] + dest.drot[2];
+        // dscale is 1,1,1 on an untouched object, but a file that never stored it
+        // reads back as zeros - which would scale the object away again.
+        const bool deltaScaleValid =
+            dest.dscale[0] != 0.f || dest.dscale[1] != 0.f || dest.dscale[2] != 0.f;
+        const float sx = dest.size[0] * (deltaScaleValid ? dest.dscale[0] : 1.f);
+        const float sy = dest.size[1] * (deltaScaleValid ? dest.dscale[1] : 1.f);
+        const float sz = dest.size[2] * (deltaScaleValid ? dest.dscale[2] : 1.f);
+
+        // Blender's eul_to_mat3, XYZ order, in its own [column][row] layout - which is
+        // also how obmat is stored, and what the loader transposes on the way out.
+        const double ci = std::cos(rx), cj = std::cos(ry), ch = std::cos(rz);
+        const double si = std::sin(rx), sj = std::sin(ry), sh = std::sin(rz);
+        const double cc = ci * ch, cs = ci * sh, sc = si * ch, ss = si * sh;
+
+        float rot3[3][3];
+        rot3[0][0] = static_cast<float>(cj * ch);
+        rot3[1][0] = static_cast<float>(sj * sc - cs);
+        rot3[2][0] = static_cast<float>(sj * cc + ss);
+        rot3[0][1] = static_cast<float>(cj * sh);
+        rot3[1][1] = static_cast<float>(sj * ss + cc);
+        rot3[2][1] = static_cast<float>(sj * cs - sc);
+        rot3[0][2] = static_cast<float>(-sj);
+        rot3[1][2] = static_cast<float>(cj * si);
+        rot3[2][2] = static_cast<float>(cj * ci);
+
+        // Scale is diagonal, so post-multiplying it just scales each column.
+        const float scale[3] = { sx, sy, sz };
+        for (int column = 0; column < 3; ++column) {
+            for (int row = 0; row < 3; ++row) {
+                dest.obmat[column][row] = rot3[column][row] * scale[column];
+            }
+            dest.obmat[column][3] = 0.f;
+        }
+        dest.obmat[3][0] = lx;
+        dest.obmat[3][1] = ly;
+        dest.obmat[3][2] = lz;
+        dest.obmat[3][3] = 1.f;
+
+        // parentinv is written as an identity-ish matrix by Blender; if it went missing
+        // with obmat, leave it as identity rather than a zero matrix that would wipe the
+        // transform back out again.
+        if (dest.parentinv[3][3] == 0.f) {
+            for (int column = 0; column < 4; ++column) {
+                for (int row = 0; row < 4; ++row) {
+                    dest.parentinv[column][row] = (column == row) ? 1.f : 0.f;
+                }
+            }
+        }
+    }
     ReadFieldArray<ErrorPolicy_Warn>(dest.parsubstr, "parsubstr", db);
     {
         std::shared_ptr<Object> parent;
