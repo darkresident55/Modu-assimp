@@ -45,6 +45,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #ifndef ASSIMP_BUILD_NO_BLEND_IMPORTER
 
 #include "BlenderScene.h"
+#include <cmath>
 #include "BlenderCustomData.h"
 #include "BlenderDNA.h"
 #include "BlenderSceneGen.h"
@@ -1023,7 +1024,11 @@ void ConvertBlender4xMeshData(Mesh &dest, const Structure &s, const FileDatabase
         v.co[0] = db.reader->GetF4();
         v.co[1] = db.reader->GetF4();
         v.co[2] = db.reader->GetF4();
-        // 4.x stores no per-vertex normal; they get computed from the faces downstream.
+        // Accumulated from the faces once the topology is built, below. It cannot be
+        // left at zero and delegated to aiProcess_GenNormals: that step skips any mesh
+        // that already carries normals, and a zero vector counts as carrying one. The
+        // loader copies these straight into the aiMesh, so zeros shade the whole model
+        // black - geometry present, lighting dead.
         v.no[0] = v.no[1] = v.no[2] = 0.f;
         v.flag = 0;
         v.mat_nr = 0;
@@ -1090,6 +1095,64 @@ void ConvertBlender4xMeshData(Mesh &dest, const Structure &s, const FileDatabase
     if (matIndex != nullptr && SeekToRawArray(matIndex->rawData, polyCount, 4, s, db)) {
         for (size_t i = 0; i < polyCount; ++i) {
             dest.mpoly[i].mat_nr = static_cast<short>(db.reader->GetI4());
+        }
+    }
+
+    // --- vertex normals -----------------------------------------------------------
+    // Area-weighted average of the adjacent face normals, via Newell's method so that
+    // non-planar n-gons - which Blender emits freely - still give a sane result rather
+    // than depending on which three corners happen to be sampled.
+    for (size_t f = 0; f < polyCount; ++f) {
+        const MPoly &poly = dest.mpoly[f];
+        if (poly.totloop < 3 || poly.loopstart < 0) {
+            continue;
+        }
+        const size_t start = static_cast<size_t>(poly.loopstart);
+        const size_t count = static_cast<size_t>(poly.totloop);
+        if (start + count > loopCount) {
+            continue;
+        }
+        float nx = 0.f, ny = 0.f, nz = 0.f;
+        for (size_t c = 0; c < count; ++c) {
+            const int ia = dest.mloop[start + c].v;
+            const int ib = dest.mloop[start + (c + 1) % count].v;
+            if (ia < 0 || ib < 0 ||
+                static_cast<size_t>(ia) >= vertCount || static_cast<size_t>(ib) >= vertCount) {
+                nx = ny = nz = 0.f;
+                break;
+            }
+            const float *a = dest.mvert[static_cast<size_t>(ia)].co;
+            const float *b = dest.mvert[static_cast<size_t>(ib)].co;
+            nx += (a[1] - b[1]) * (a[2] + b[2]);
+            ny += (a[2] - b[2]) * (a[0] + b[0]);
+            nz += (a[0] - b[0]) * (a[1] + b[1]);
+        }
+        // Left unnormalised on purpose: the magnitude is twice the face area, which is
+        // exactly the weight a shared vertex should give this face.
+        for (size_t c = 0; c < count; ++c) {
+            const int iv = dest.mloop[start + c].v;
+            if (iv < 0 || static_cast<size_t>(iv) >= vertCount) {
+                continue;
+            }
+            MVert &v = dest.mvert[static_cast<size_t>(iv)];
+            v.no[0] += nx;
+            v.no[1] += ny;
+            v.no[2] += nz;
+        }
+    }
+    for (size_t i = 0; i < vertCount; ++i) {
+        MVert &v = dest.mvert[i];
+        const float len = std::sqrt(v.no[0] * v.no[0] + v.no[1] * v.no[1] + v.no[2] * v.no[2]);
+        if (len > 1e-20f) {
+            v.no[0] /= len;
+            v.no[1] /= len;
+            v.no[2] /= len;
+        } else {
+            // Loose or degenerate vertex; any unit vector beats a zero one, which would
+            // read as an unlit black fragment.
+            v.no[0] = 0.f;
+            v.no[1] = 0.f;
+            v.no[2] = 1.f;
         }
     }
 }
